@@ -146,6 +146,9 @@ fn main() -> Result<()> {
 
     // Check if the files are valid JPEG images and extract metadata from the valid ones
     for path in &args.files {
+        if !path.exists() {
+            continue;
+        }
         if !is_jpeg(path)? {
             non_jpeg_files.push(path.clone());
         }
@@ -164,3 +167,51 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_is_jpeg_true() {
+        let path = PathBuf::from("images/JAM26284.jpg");
+        assert_eq!(is_jpeg(&path).unwrap(), true);
+    }
+
+    #[test]
+    fn test_is_jpeg_false() {
+        let path = PathBuf::from("images/non-jpeg.png");
+        assert_eq!(is_jpeg(&path).unwrap(), false);
+    }
+
+    #[test]
+    fn test_extract_filesystem_metadata() {
+        let path = PathBuf::from("images/JAM19896.jpg");
+        let meta = extract_filesystem_metadata(&path).unwrap();
+        assert!(meta.size == 3014190);
+        
+        let expected_time = Utc.with_ymd_and_hms(2020, 8, 13, 10, 57, 7).unwrap();
+        assert_eq!(meta.created_time, expected_time);
+        assert_eq!(meta.modified_time, expected_time);
+    }
+
+    #[test]
+    fn test_extract_exif_metadata() {
+        let path = PathBuf::from("images/JAM26284.jpg");
+        let exif = extract_exif_metadata(&path).unwrap();
+        assert_eq!(exif.orientation, Some(1));
+        assert_eq!(exif.camera_model, Some("\"Canon EOS 5D Mark IV\"".to_string()));
+        assert_eq!(exif.camera_serial, Some("\"025021000535\"".to_string()));
+    }
+
+    #[test]
+    fn test_process_file() {
+        let path = PathBuf::from("images/JAM26284.jpg");
+        // Should not panic or error
+        assert!(process_file(&path).is_ok());
+        // Optionally, check that the output JSON file was created
+        let json_path = path.with_extension("json");
+        assert!(json_path.exists());
+    }
+} 

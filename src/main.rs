@@ -1,10 +1,29 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, TimeZone, Utc};
 use clap::Parser;
-use std::path::PathBuf;
+use exif::{Reader, Tag, In};
+use serde::Serialize;
+use std::fs;
 use std::fs::File;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
-// Command line arguments
+#[derive(Debug)]
+struct FilesystemMetadata {
+    size: u64,
+    created_time: DateTime<Utc>,
+    modified_time: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct ExifMetadata {
+    orientation: Option<u32>,
+    capture_time: Option<DateTime<Utc>>,
+    camera_model: Option<String>,
+    camera_serial: Option<String>,
+}
+
+/// Command line arguments
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -13,6 +32,105 @@ struct Args {
     files: Vec<PathBuf>,
 }
 
+/// Metadata extracted from a JPEG image
+#[derive(Debug, Serialize)]
+struct ImageMetadata {
+    filename: String,
+    size: u64,
+    created_time: DateTime<Utc>,
+    modified_time: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orientation: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_time: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_serial: Option<String>,
+}
+
+/// Extract filesystem metadata from a file
+fn extract_filesystem_metadata(path: &Path) -> Result<FilesystemMetadata> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
+
+    let created_time = metadata.created()
+        .with_context(|| format!("Failed to get creation time for {}", path.display()))?;
+    let modified_time = metadata.modified()
+        .with_context(|| format!("Failed to get modification time for {}", path.display()))?;
+
+    Ok(FilesystemMetadata {
+        size: metadata.len(),
+        created_time: DateTime::from(created_time),
+        modified_time: DateTime::from(modified_time),
+    })
+}
+
+/// Extract EXIF metadata from a JPEG file
+fn extract_exif_metadata(path: &Path) -> Result<ExifMetadata> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open file {}", path.display()))?;
+    
+    let mut bufreader = std::io::BufReader::new(file);
+    let exifreader = Reader::new();
+    let exif = exifreader.read_from_container(&mut bufreader)?;
+
+    let orientation = exif.get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0));
+
+    let capture_time = exif.get_field(Tag::DateTimeOriginal, In::PRIMARY)
+        .and_then(|field| {
+            let s = field.display_value().with_unit(&exif).to_string();
+            chrono::NaiveDateTime::parse_from_str(&s, "%Y:%m:%d %H:%M:%S").ok()
+                .map(|dt| Utc.from_utc_datetime(&dt))
+        });
+
+    let camera_model = exif.get_field(Tag::Model, In::PRIMARY)
+        .map(|field| field.display_value().with_unit(&exif).to_string());
+
+    let camera_serial = exif.get_field(Tag::BodySerialNumber, In::PRIMARY)
+        .map(|field| field.display_value().with_unit(&exif).to_string());
+
+    Ok(ExifMetadata {
+        orientation,
+        capture_time,
+        camera_model,
+        camera_serial,
+    })
+}
+
+/// Process a single JPEG file and generate its metadata JSON
+fn process_file(path: &Path) -> Result<()> {
+    let fs_metadata = extract_filesystem_metadata(path)?;
+    let exif_metadata = extract_exif_metadata(path)?;
+
+    let metadata = ImageMetadata {
+        filename: path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid filename"))?
+            .to_string(),
+        size: fs_metadata.size,
+        created_time: fs_metadata.created_time,
+        modified_time: fs_metadata.modified_time,
+        orientation: exif_metadata.orientation,
+        capture_time: exif_metadata.capture_time,
+        camera_model: exif_metadata.camera_model,
+        camera_serial: exif_metadata.camera_serial,
+    };
+
+    // Create output path by replacing extension with .json
+    let output_path: PathBuf = path.with_extension("json");
+    
+    // Write JSON to file
+    let json: String = serde_json::to_string_pretty(&metadata)?;
+    fs::write(&output_path, json)
+        .with_context(|| format!("Failed to write metadata to {}", output_path.display()))?;
+
+    println!("Processed: {}", path.display());
+    Ok(())
+}
+
+/// Checks if the file is a valid JPEG
 fn is_jpeg(path: &PathBuf) -> Result<bool> {
     let mut file = File::open(path)?;
     let mut buffer = [0; 2];
@@ -26,14 +144,13 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let mut non_jpeg_files = Vec::new();
 
-    // First, check all files
+    // Check if the files are valid JPEG images and extract metadata from the valid ones
     for path in &args.files {
         if !is_jpeg(path)? {
             non_jpeg_files.push(path.clone());
         }
-        else{
-            // TODO: Extract metadata from the file. For now just print the file path.
-            println!("Processing JPEG file: {}", path.display());
+        else if let Err(e) = process_file(&path) {
+            eprintln!("Error processing {}: {}", path.display(), e);
         }
     }
 

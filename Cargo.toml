@@ -1,0 +1,11 @@
+[package]
+name = "jpeg-metadata-extractor"
+version = "0.1.0"
+edition = "2021"
+authors = ["Hugo B"]
+description = "A command-line tool for extracting metadata from JPEG images"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
